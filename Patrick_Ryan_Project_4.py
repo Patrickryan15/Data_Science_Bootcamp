@@ -3,7 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     classification_report, accuracy_score, precision_score, recall_score, f1_score,
     ConfusionMatrixDisplay, confusion_matrix, roc_auc_score, roc_curve
@@ -12,13 +11,11 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import GridSearchCV, cross_val_score
 from sklearn.feature_selection import RFE
-from imblearn.over_sampling import RandomOverSampler
 from imblearn.over_sampling import SMOTE
 import xgboost as xgb
 from xgboost import XGBClassifier
 import logging
 from joblib import parallel_backend
-import json
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -43,22 +40,46 @@ def define_age_group(age):
     else:
         return 'elderly'
 
-def remove_missing_rows(df):
-    logging.info("Removing rows with missing values...")
-    df_cleaned = df.dropna()
-    return df_cleaned
-
-def remove_missing_important_features(df, important_features):
-    logging.info("Removing rows with missing values for important features...")
+def handle_missing_values(df, numerical_cols, important_features=None):
+    logging.info("Handling missing values...")
+    original_rows = df.shape[0]  # Total number of rows in the original DataFrame
+    
     # Check if any important features have missing values
-    missing_cols = [col for col in important_features if col in df.columns and df[col].isnull().any()]
-    if missing_cols:
-        # Remove rows with missing values for important features
-        df_cleaned = df.dropna(subset=missing_cols)
-        return df_cleaned
+    if important_features:
+        logging.info("Removing rows with missing values for important features...")
+        missing_cols = [col for col in important_features if col in df.columns and df[col].isnull().any()]
+        if missing_cols:
+            # Remove rows with missing values for important features
+            df_cleaned = df.dropna(subset=missing_cols)
+            remaining_rows = df_cleaned.shape[0]  # Number of rows after cleaning
+            removed_rows = original_rows - remaining_rows
+            logging.info(f"Removed {removed_rows} rows ({(removed_rows / original_rows) * 100:.2f}%) with missing values for important features.")
+            logging.info(f"Percentage of data remaining: {(remaining_rows / original_rows) * 100:.2f}%")
+        else:
+            logging.info("No rows with missing values for important features. DataFrame remains unchanged.")
+            df_cleaned = df.copy()
     else:
-        logging.info("No rows with missing values for important features. DataFrame remains unchanged.")
-        return df
+        logging.info("Removing all rows with missing values...")
+        df_cleaned = df.dropna()
+        remaining_rows = df_cleaned.shape[0]  # Number of rows after cleaning
+        removed_rows = original_rows - remaining_rows
+        logging.info(f"Removed {removed_rows} rows ({(removed_rows / original_rows) * 100:.2f}%) with missing values.")
+        logging.info(f"Percentage of data remaining: {(remaining_rows / original_rows) * 100:.2f}%")
+
+    # Convert numerical_cols to pandas Index
+    numerical_cols = pd.Index(numerical_cols)
+
+    # Impute missing values for numerical columns
+    if not numerical_cols.empty:
+        imputer_numeric = SimpleImputer(strategy='median')
+        df_cleaned[numerical_cols] = imputer_numeric.fit_transform(df_cleaned[numerical_cols])
+
+    # Impute missing values for categorical columns
+    for col in df_cleaned.columns:
+        if col not in numerical_cols:
+            df_cleaned[col].fillna(df_cleaned[col].mode()[0], inplace=True)
+
+    return df_cleaned
 
 def handle_class_imbalance(X_train, y_train):
     logging.info("Handling class imbalance...")
@@ -69,27 +90,14 @@ def handle_class_imbalance(X_train, y_train):
         threshold = 0.5
         y_train_binary = (y_train > threshold).astype(int)
         # Use SMOTE to handle class imbalance
-        smote = SMOTE(sampling_strategy=0.5, random_state=42)  # Adjust sampling_strategy as needed
+        smote = SMOTE(sampling_strategy='auto', random_state=42)  # 'auto' adjusts the strategy based on the input data
         X_resampled, y_resampled = smote.fit_resample(X_train, y_train_binary)
         return X_resampled, y_resampled
     else:
         # If labels are not numeric, proceed with SMOTE without conversion
-        smote = SMOTE(sampling_strategy=0.5, random_state=42)  # Adjust sampling_strategy as needed
+        smote = SMOTE(sampling_strategy='auto', random_state=42)  # 'auto' adjusts the strategy based on the input data
         X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
         return X_resampled, y_resampled
-
-def handle_missing_values(df, numerical_cols):
-    logging.info("Handling missing values...")
-    if df.empty:
-        logging.warning("DataFrame is empty after loading.")
-        return df
-    if numerical_cols:
-        imputer_numeric = SimpleImputer(strategy='median')
-        df[numerical_cols] = imputer_numeric.fit_transform(df[numerical_cols])
-    for col in df.columns:
-        if col not in numerical_cols:
-            df[col].fillna(df[col].mode()[0], inplace=True)
-    return df
 
 def feature_engineering(df_encoded):
     logging.info("Performing feature engineering...")
@@ -246,7 +254,8 @@ def data_preprocessing(df):
 def identify_important_features(df_encoded, n_features_to_select_range=range(1, 21), threshold=0.5):
     logging.info("Identifying important features using Recursive Feature Elimination (RFE)...")
     # After handling class imbalance and before feature engineering, remove rows with missing values
-    df_no_missing = remove_missing_rows(df_encoded)
+    categorical_cols, numerical_cols = identify_column_type(df_encoded)
+    df_no_missing = handle_missing_values(df_encoded, numerical_cols)
     # Splitting the Data for initial training
     X_task2_no_missing = df_no_missing.drop(['ICU'], axis=1)
     y_task2_no_missing = df_no_missing['ICU']
@@ -303,7 +312,7 @@ df_encoded = data_preprocessing(df)
 # Identify important features
 important_features = identify_important_features(df_encoded)
 # Impute rows with missing values for important features from the original dataset
-df_cleaned = remove_missing_important_features(df_encoded, important_features)
+df_cleaned = handle_missing_values(df_encoded, important_features)
 # Splitting the Data for updated training
 X_task2 = df_cleaned.drop(['ICU'], axis=1)
 y_task2 = df_cleaned['ICU']
